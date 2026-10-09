@@ -334,6 +334,26 @@ async function createTicket(interaction: any, input: {
   attachmentUrl: string | null;
   assigneeId: string | null;
 }) {
+  try {
+    await createTicketInner(interaction, input);
+  } catch (e: any) {
+    console.error("createTicket failed:", e);
+    try {
+      await followup(interaction, {
+        content: `⚠️ Could not create the ticket: ${e.message ?? e}. Try again.`,
+        flags: 64,
+      });
+    } catch { /* nothing more we can do */ }
+  }
+}
+
+async function createTicketInner(interaction: any, input: {
+  title: string | null;
+  description: string | null;
+  priority: string;
+  attachmentUrl: string | null;
+  assigneeId: string | null;
+}) {
   const requester = user(interaction);
   const text = `${input.title ?? ""} ${input.description ?? ""}`.trim();
   const auto = input.priority === "auto";
@@ -532,9 +552,10 @@ async function loadView(ticketId: string): Promise<View> {
            (select s.status_code from ticket_status_event s
              where s.ticket_id = t.ticket_id
              order by s.occurred_at_utc desc, s.status_event_id desc limit 1) as status,
-           (select count(*)::int from ticket_note n where n.ticket_id = t.ticket_id) as notes,
-           (select jsonb_agg(n.note_text order by n.created_at_utc, n.note_id)
-              from ticket_note n where n.ticket_id = t.ticket_id) as note_list`;
+           (select count(*)::int from ticket_note n where n.ticket_id = t.ticket_id) as notes
+    from ticket t
+    left join discord_user u on u.user_id = t.requester_user_id
+    where t.ticket_id = ${ticketId}`;
   if (!row) return { ticket_id: ticketId, exists: false };
   return row;
 }
