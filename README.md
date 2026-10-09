@@ -1,52 +1,154 @@
-# deno-it-bot
+# Deno IT ticket bot
 
-The `/it` IT-ticket flow as an HTTP-interactions Discord bot for **Deno Deploy** —
-no gateway, no ECS: interactions arrive over HTTP, tickets live in the same
-normalized Neon Postgres schema as the C# bot, priorities are classified by
-Cloudflare Workers AI's clef model, and the IT directory (priorities, staff,
-absences) stays editable in the Google Sheet.
+A standalone Deno HTTP application for Discord. It uses the existing normalized
+Neon Postgres ticket database, Cloudflare Workers AI clef, and Google Sheets.
+`src/main.ts` starts the HTTP server and scheduled maintenance. The application
+does not depend on the C# projects.
 
-## Endpoints
+## Features
 
-- `POST /interactions` — Discord interactions (signature-verified)
-- `GET /` — health check ("YouAnd-I IT ticket bot (HTTP) is running")
+- `/it` accepts optional title, description, priority, attachment, and assignee.
+  With no arguments it opens a form with an upload and priority selector.
+- Ticket cards include priority, classifier status, assignee, attachment, notes,
+  creation time, and matching saved solutions. Requesters and assigned staff get
+  private cards. A command in a bot DM posts a normal message in that
+  conversation. If a requester cannot receive a DM, the card stays in their
+  ephemeral reply.
+- Cancel, Complete, Unsolved, Planned, Reopen, Add note, and Report are wired to
+  persistent ticket changes. Reports include evidence, default to anonymous, and
+  mark the ticket complete. Report text never appears on ticket cards.
+- Auto classification reads the current priority guidance and on-duty roster.
+  Staff absences apply for the entire UTC day when dates have no time. Explicit
+  assignees take precedence. An unavailable classifier defaults to urgent. A
+  configured fallback staff member who is absent is not selected automatically.
+- `/ping`, `/greet`, `/tools square`, `/tools echo`, `/fruit` with autocomplete,
+  `/components`, `/form`, User Info, and Echo Message match the reference bot.
+- Slash commands, context commands, components, autocomplete, and modal
+  submissions are audited. Replayed interactions do not add duplicate audit
+  options. Anonymous report audits omit the user ID and report contents.
+- Every public database table is mirrored to a spreadsheet, with a Dashboard for
+  open and stale tickets, planned and complete counts, staff solutions, recent
+  activity, and charts. Tabs have headers, banding, filters, column sizing,
+  dates, text IDs, checkboxes, dropdowns, status colors, and warning-only ID
+  protection.
+- Changes to `it_staff`, `it_staff_absence`, and `priority` flow back from the
+  sheet before the database is mirrored. Header order and extra columns are
+  tolerated. Missing or malformed tabs are ignored. A tab containing only a
+  valid header clears its rows; removed staff are deactivated, retaining their
+  history.
+- `it-tickets/*.s.json` solution files are mirrored on startup. Existing
+  solutions already in Neon also work without local files.
+  `TICKET_SOLUTIONS_DIR` changes the source directory.
+- `/terms` and `/privacy` provide the Discord developer portal policy pages.
 
-## Commands
+## Local setup
 
-- `/it [title] [description] [priority:auto|urgent|no-rush] [attachment] [assignee]`
-  — no arguments opens the modal form. Auto priority goes through clef, which
-  also picks the assignee when the directory has ≥2 on-duty staff.
-- Card buttons: Complete / Planned / Unsolved / Cancel, Reopen, Add note, Report
-  (confidential, anonymous by default).
+Run from this repository directory. Keep the existing `.env`, or create one from
+`.env.example` if it does not exist. Then run:
 
-## Environment variables (Deno Deploy → Settings → Environment Variables)
+```sh
+deno task check
+deno task test
+deno task start
+```
 
-| Variable | Value |
-|---|---|
-| `DISCORD_PUBLIC_KEY` | application verify key (dev portal → General Information) |
-| `DISCORD_TOKEN` | bot token |
-| `DISCORD_IT_USER` | optional fallback assignee when the directory is empty (Discord user id) |
-| `DATABASE_URL` | Neon pooled connection string (`postgresql://…-pooler…/neondb?sslmode=require`) |
-| `CLOUDFLARE_ACCOUNT_ID` | Workers AI account id |
-| `CLOUDFLARE_API_TOKEN` | Workers AI token |
-| `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` / `GOOGLE_REFRESH_TOKEN` | OAuth for the sheet API |
-| `GOOGLE_SPREADSHEET_ID` | the directory spreadsheet id |
+The server defaults to `http://localhost:8000`. `/` reports that the HTTP
+process is running; `/ready` returns 200 after the database schema initializes
+and 503 while it is starting. `PORT` changes the listener port.
 
-## Setup
+`deno task test:http` also runs a real local HTTP listener test. It needs an
+environment that permits binding a local port. The default tests exercise signed
+requests directly against the same HTTP handler, with fake external services.
 
-1. Push this repo and connect it as the Deno Deploy project (entrypoint `src/main.ts`).
-2. Add the environment variables for **Production** (and Preview).
-3. In the Discord dev portal → General Information → **Interactions Endpoint URL**:
-   `https://<your-project>.deno.dev/interactions`. Discord verifies it with a PING.
-4. Commands (`/it`, `/ping`) are (re)registered automatically on cold start.
+The local `.env` is ignored by Git. Deno Deploy supplies the same variables
+through its environment settings.
 
-Note: with an Interactions Endpoint URL set, Discord delivers interactions over
-HTTP — the gateway-based C# bot will not receive them while the URL is
-configured. Clear the URL to hand control back to the C# bot.
+| Variable                 | Purpose                                                                 |
+| ------------------------ | ----------------------------------------------------------------------- |
+| `DISCORD_PUBLIC_KEY`     | Discord application verification key, 64 hex characters                 |
+| `DISCORD_TOKEN`          | Discord bot token                                                       |
+| `DISCORD_APPLICATION_ID` | Optional application ID; otherwise resolved through Discord             |
+| `DISCORD_IT_USER`        | Optional initial on-call staff member and empty-roster fallback         |
+| `DATABASE_URL`           | Neon pooled PostgreSQL URL, including `sslmode=require`                 |
+| `DATABASE_URL_UNPOOLED`  | Optional direct URL for `deno task migrate`                             |
+| `CLOUDFLARE_ACCOUNT_ID`  | Workers AI account ID                                                   |
+| `CLOUDFLARE_API_TOKEN`   | Workers AI API token                                                    |
+| `GOOGLE_CLIENT_ID`       | Google Desktop OAuth client ID                                          |
+| `GOOGLE_CLIENT_SECRET`   | Google OAuth client secret                                              |
+| `GOOGLE_REFRESH_TOKEN`   | Refresh token with the spreadsheets scope                               |
+| `GOOGLE_SPREADSHEET_ID`  | Existing spreadsheet ID; otherwise one is created and saved in Neon     |
+| `TICKET_SOLUTIONS_DIR`   | Optional directory containing `.s.json` files; defaults to `it-tickets` |
+| `REGISTER_COMMANDS`      | Set to `false` to disable automatic registration                        |
+| `PORT`                   | Local listener port; defaults to 8000                                   |
 
-## Sheet sync
+The existing Neon tickets, users, notes, reports, staff, and solutions are
+reused. `src/schema.sql` initializes an empty database and adds the internal job
+and sync tables to an existing one. Initialization is serialized with a
+transaction lock. It does not overwrite edited priority guidance or remove
+existing tables. `deno task migrate` runs this schema setup separately; use a
+development Neon branch when validating schema changes before production.
 
-`Deno.cron` mirrors the sheet's `priority`, `it_staff` and `it_staff_absence`
-tabs into Neon every 10 minutes (and once at cold start). Priorities removed
-from the sheet are dropped unless existing tickets reference them; staff are
-deactivated through the Active column, never deleted.
+`deno task google-auth` opens a local OAuth callback listener and prints a
+browser consent URL. After approval it prints the refresh token for the
+environment file. Use a Desktop-type OAuth client with the Google Sheets API
+enabled.
+
+## Deno Deploy and Discord setup
+
+Configure the Deno Deploy application with entrypoint `src/main.ts` and this
+repository as its source. Configure credentials for the intended production and
+preview contexts. Keep preview databases separate when trying changes.
+
+Set these Discord developer portal URLs using the HTTPS domain from Deno Deploy:
+
+| Portal field              | URL                                 |
+| ------------------------- | ----------------------------------- |
+| Interactions Endpoint URL | `https://<app-domain>/interactions` |
+| Terms of Service URL      | `https://<app-domain>/terms`        |
+| Privacy Policy URL        | `https://<app-domain>/privacy`      |
+
+Linked Roles Verification URL is optional. This app does not implement a linked
+role OAuth verification flow, so leave that field empty. The policy pages
+describe the bot's actual data flow; the application operator is the contact for
+user requests.
+
+Commands register automatically after database initialization. Registration
+upserts this app's commands and preserves unrelated commands. The command
+version is saved in Neon to avoid registering them on every replica or cold
+start. `deno task register` forces registration without starting the HTTP
+server.
+
+Discord validates the endpoint with a signed PING. PING and the policy pages
+work while the database is initializing. Requests with invalid or old signatures
+get 401. Configuring an HTTP interactions endpoint routes commands to this
+application; the gateway-based C# bot will not receive those interactions.
+
+## Deferred work and scheduled sync
+
+Ticket operations are saved in `ticket_job` before returning Discord's deferred
+acknowledgement. A worker starts immediately, and `ticket-job-retry` runs every
+minute to resume interrupted jobs. The ticket mutation and its applied marker
+commit in one transaction, so recovery does not create another ticket, note,
+report, or status event. Workers claim jobs with a lease and `SKIP LOCKED`.
+Discord DM deliveries use an interaction nonce to reduce duplicate messages
+during retries. Original interaction replies are edited through Discord's
+webhook endpoint.
+
+Completed jobs clear their payload and tokens immediately. Expired jobs are
+removed on maintenance. Jobs expire before Discord's 15-minute interaction token
+deadline; persistent tickets remain even if final delivery cannot be completed.
+Permanent DM restrictions can prevent notifying an assigned staff member.
+
+`sheet-directory-sync` runs at startup and every ten minutes. A database lease
+prevents overlapping replicas from repeatedly writing the same spreadsheet.
+Internal job and sync tables are excluded from the export, so interaction tokens
+and queued report payloads never appear in Sheets. The spreadsheet itself
+contains confidential reports and should be shared only with authorized
+administrators.
+
+The protocol follows the official
+[Discord component reference](https://docs.discord.com/developers/components/reference)
+and
+[interaction response contract](https://docs.discord.com/developers/interactions/receiving-and-responding).
+The recovery queue accounts for
+[Deno Deploy's runtime lifecycle](https://docs.deno.com/deploy/reference/runtime/).

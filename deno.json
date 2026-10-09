@@ -1,0 +1,17 @@
+{
+  "imports": {
+    "discord-interactions": "npm:discord-interactions@4.4.0",
+    "postgres": "npm:postgres@3.4.9"
+  },
+  "nodeModulesDir": "none",
+  "unstable": ["cron"],
+  "tasks": {
+    "start": "deno run --allow-env --allow-net --allow-read --env-file=.env src/main.ts",
+    "check": "deno check src/*.ts tests/*.ts && deno lint && deno fmt --check",
+    "test": "deno test --allow-env --allow-net --allow-read=src,tests/fixtures tests/",
+    "test:http": "TEST_HTTP=true deno task test",
+    "register": "deno run --allow-env --allow-net --env-file=.env src/register.ts",
+    "migrate": "deno run --allow-env --allow-net --allow-read=src --env-file=.env src/migrate.ts",
+    "google-auth": "deno run --allow-env --allow-net --env-file=.env src/google_auth.ts"
+  }
+}
