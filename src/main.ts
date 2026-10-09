@@ -155,7 +155,7 @@ function itCommand(interaction: any, ctx: any) {
             { label: "Auto (let the model decide)", value: "auto", default: true },
             { label: "Urgent", value: "urgent" },
             { label: "No rush", value: "no-rush" },
-          ], false)),
+          ])),
         ],
       },
     });
@@ -184,8 +184,10 @@ const row = (...components: any[]) => ({ type: 1, components });
 const textInput = (id: string, label: string, style: number, required = true) => ({
   type: 4, custom_id: id, label, style, max_length: 2000, required,
 });
-const select = (id: string, label: string, options: any[], required = true) => ({
-  type: 3, custom_id: id, label, options, required,
+// Selects have no label/required fields — placeholder only, or Discord
+// rejects the modal and nothing opens.
+const select = (id: string, placeholder: string, options: any[]) => ({
+  type: 3, custom_id: id, placeholder, options,
 });
 
 // ============================================================
