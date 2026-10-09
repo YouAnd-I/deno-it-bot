@@ -1,9 +1,9 @@
 # Deno IT ticket bot
 
-A standalone Deno HTTP application for Discord. It uses the existing normalized
-Neon Postgres ticket database, Cloudflare Workers AI clef, and Google Sheets.
-`src/main.ts` starts the HTTP server and scheduled maintenance. The application
-does not depend on the C# projects.
+A standalone Deno Discordeno application for Discord. It uses the existing
+normalized Neon Postgres ticket database, Cloudflare Workers AI clef, and Google
+Sheets. `src/main.ts` connects to Discord's Gateway, starts the HTTP server, and
+runs scheduled maintenance. The application does not depend on the C# projects.
 
 ## Features
 
@@ -52,9 +52,21 @@ deno task test
 deno task start
 ```
 
-The server defaults to `http://localhost:8000`. `/` reports that the HTTP
-process is running; `/ready` returns 200 after the database schema initializes
-and 503 while it is starting. `PORT` changes the listener port.
+`deno task start` connects directly to Discord using Discordeno. Wait for
+`[discord] Gateway shard 0 READY; receiving interactions`, then use `/ping` or
+`/it` in Discord. No tunnel or public HTTP URL is needed. Leave the Discord
+Developer Portal's Interactions Endpoint URL empty for this mode. Startup fails
+with a clear error if that field would route commands somewhere else.
+
+The HTTP server defaults to `http://localhost:8000`. `/ready` returns 200 only
+after the database initializes and the Gateway connects, and 503 during startup
+or a disconnect. `PORT` changes the listener port. The HTTP server also serves
+the policy pages and the signed interaction endpoint.
+
+`deno task start:http` explicitly uses HTTP interactions instead. Discord must
+be configured to reach that server through a public HTTPS endpoint; localhost
+alone cannot receive Discord webhooks. Both transports share all command,
+component, modal, audit, and ticket handlers.
 
 `deno task test:http` also runs a real local HTTP listener test. It needs an
 environment that permits binding a local port. The default tests exercise signed
@@ -65,8 +77,9 @@ through its environment settings.
 
 | Variable                 | Purpose                                                                 |
 | ------------------------ | ----------------------------------------------------------------------- |
-| `DISCORD_PUBLIC_KEY`     | Discord application verification key, 64 hex characters                 |
+| `DISCORD_PUBLIC_KEY`     | Discord verification key, 64 hex characters; required for HTTP mode     |
 | `DISCORD_TOKEN`          | Discord bot token                                                       |
+| `DISCORD_TRANSPORT`      | `gateway` (default) for local/server bots; `http` for Deno Deploy       |
 | `DISCORD_APPLICATION_ID` | Optional application ID; otherwise resolved through Discord             |
 | `DISCORD_IT_USER`        | Optional initial on-call staff member and empty-roster fallback         |
 | `DATABASE_URL`           | Neon pooled PostgreSQL URL, including `sslmode=require`                 |
@@ -95,9 +108,10 @@ enabled.
 
 ## Deno Deploy and Discord setup
 
-Configure the Deno Deploy application with entrypoint `src/main.ts` and this
-repository as its source. Configure credentials for the intended production and
-preview contexts. Keep preview databases separate when trying changes.
+Configure the Deno Deploy application with entrypoint `src/main.ts`,
+`DISCORD_TRANSPORT=http`, and this repository as its source. Configure
+credentials for the intended production and preview contexts. Keep preview
+databases separate when trying changes.
 
 Set these Discord developer portal URLs using the HTTPS domain from Deno Deploy:
 

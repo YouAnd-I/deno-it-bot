@@ -80,6 +80,16 @@ export class DiscordClient {
     console.log(`[discord] registered ${COMMANDS.length} commands`);
   }
 
+  respond(interaction: Interaction, payload: Record<string, unknown>) {
+    return this.request(
+      `/interactions/${interaction.id}/${interaction.token}/callback`,
+      "POST",
+      payload,
+      undefined,
+      false,
+    );
+  }
+
   editOriginal(
     interaction: Interaction,
     payload: Record<string, unknown>,

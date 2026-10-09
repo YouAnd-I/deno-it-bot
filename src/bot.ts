@@ -109,7 +109,6 @@ export function createBot(
       return json(message("This interaction has no Discord user."));
     }
     await enqueueJob(sql, payload, ticketId);
-    background(processPending, "jobs");
     return json({
       type: responseType,
       ...(responseType === 5 ? { data: { flags: 64 } } : {}),
@@ -324,6 +323,15 @@ export function createBot(
       return new Response("Invalid interaction", { status: 400 });
     }
     if (interaction.type === 1) return json({ type: 1 });
+    const response = await handleInteraction(interaction);
+    background(processPending, "jobs");
+    return response;
+  }
+
+  async function handleInteraction(
+    interaction: Interaction,
+  ): Promise<Response> {
+    if (interaction.type === 1) return json({ type: 1 });
     background(async () => {
       await initialize();
       await recordInteraction(sql, interaction);
@@ -335,6 +343,21 @@ export function createBot(
       return json(
         message("Could not handle this interaction. Please try again."),
       );
+    }
+  }
+
+  async function handleGatewayInteraction(interaction: Interaction) {
+    const response = await handleInteraction(interaction);
+    const payload = await response.json();
+    await discord.respond(interaction, payload);
+    console.log(
+      `[discord] acknowledged ${interaction.id} ${
+        interaction.data?.name ?? interaction.data?.custom_id ??
+          interaction.type
+      }`,
+    );
+    if (payload.type === 5 || payload.type === 6) {
+      background(processPending, "jobs");
     }
   }
 
@@ -548,6 +571,7 @@ export function createBot(
 
   return {
     fetch: fetchRequest,
+    handleGatewayInteraction,
     initialize,
     processPending,
     syncSheets,
