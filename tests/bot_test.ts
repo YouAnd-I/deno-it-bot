@@ -33,6 +33,49 @@ Deno.test("signature verification handles valid PING without a database", async 
   equal(queries.length, 0);
 });
 
+Deno.test("requester and IT DMs do not share Discord's author-wide nonce, while retries deduplicate", async () => {
+  const messages = new Map<string, { id: string; channel: string }>();
+  const discord = new DiscordClient("test", (url, init) => {
+    const payload = JSON.parse(String(init?.body));
+    if (String(url).endsWith("/users/@me/channels")) {
+      return Promise.resolve(json({ id: `dm-${payload.recipient_id}` }));
+    }
+    const channel = String(url).split("/").at(-2)!;
+    equal(payload.enforce_nonce, true);
+    ok(payload.nonce.length <= 25);
+    let message = messages.get(payload.nonce);
+    if (message && message.channel !== channel) {
+      return Promise.resolve(
+        json({ message: "Unknown Message", code: 10008 }, 404),
+      );
+    }
+    if (!message) {
+      message = { id: `message-${messages.size + 1}`, channel };
+      messages.set(payload.nonce, message);
+    }
+    return Promise.resolve(json(message));
+  });
+  const requester = await discord.dm(
+    "42",
+    { content: "Your ticket" },
+    "1558115229102247987",
+  );
+  const staff = await discord.dm("407442087664156674", {
+    content: "Assigned to you",
+  }, "1558115229102247987");
+  equal(requester.id, "message-1");
+  equal(staff.id, "message-2");
+  equal(
+    (await discord.dm(
+      "407442087664156674",
+      { content: "Assigned to you" },
+      "1558115229102247987",
+    )).id,
+    staff.id,
+  );
+  equal(messages.size, 2);
+});
+
 Deno.test("invalid, malformed, and tampered signatures are rejected", async () => {
   const { sql } = fakeDatabase();
   const bot = createBot({ publicKey, token: "test" }, sql);

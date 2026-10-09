@@ -156,9 +156,10 @@ acknowledgement. A worker starts immediately, and `ticket-job-retry` runs every
 minute to resume interrupted jobs. The ticket mutation and its applied marker
 commit in one transaction, so recovery does not create another ticket, note,
 report, or status event. Workers claim jobs with a lease and `SKIP LOCKED`.
-Discord DM deliveries use an interaction nonce to reduce duplicate messages
-during retries. Original interaction replies are edited through Discord's
-webhook endpoint.
+Discord DM deliveries use a nonce derived from the interaction and destination
+channel, so requester and IT notifications remain distinct while retries
+deduplicate each delivery. Original interaction replies are edited through
+Discord's webhook endpoint.
 
 Completed jobs clear their payload and tokens immediately. Expired jobs are
 removed on maintenance. Jobs expire before Discord's 15-minute interaction token

@@ -118,15 +118,23 @@ export class DiscordClient {
     );
   }
 
-  sendMessage(
+  async sendMessage(
     channelId: string,
     content: Record<string, unknown>,
     nonce: string,
     media?: Media | null,
   ) {
+    const digest = await crypto.subtle.digest(
+      "SHA-256",
+      new TextEncoder().encode(`${channelId}:${nonce}`),
+    );
+    const scopedNonce = Array.from(
+      new Uint8Array(digest),
+      (value) => value.toString(16).padStart(2, "0"),
+    ).join("").slice(0, 24);
     return this.request(`/channels/${channelId}/messages`, "POST", {
       ...content,
-      nonce,
+      nonce: scopedNonce,
       enforce_nonce: true,
     }, media);
   }
