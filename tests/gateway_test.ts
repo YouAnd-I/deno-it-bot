@@ -2,6 +2,7 @@ import { deepStrictEqual, equal, ok, rejects } from "node:assert/strict";
 import { createBot } from "../src/bot.ts";
 import { connectGateway } from "../src/gateway.ts";
 import type { Interaction } from "../src/protocol.ts";
+import { transportFor } from "../src/runtime.ts";
 import { delay, fakeDatabase, json, publicKey } from "./helpers.ts";
 
 const interaction = (data: Interaction["data"], type = 2): Interaction => ({
@@ -11,6 +12,18 @@ const interaction = (data: Interaction["data"], type = 2): Interaction => ({
   token: "test-token",
   user: { id: "42", username: "alice" },
   data,
+});
+
+Deno.test("local and Deno Deploy choose working transports without an extra setting", () => {
+  const resolve = (variables: Record<string, string>, http = false) =>
+    transportFor((key) => variables[key], http);
+  equal(resolve({}), "gateway");
+  equal(resolve({ DENO_DEPLOY: "true" }), "http");
+  equal(resolve({ DENO_DEPLOYMENT_ID: "classic-deployment" }), "http");
+  equal(resolve({ DISCORD_TRANSPORT: "", DENO_DEPLOY: "true" }), "http");
+  equal(resolve({ DISCORD_TRANSPORT: "gateway" }), "gateway");
+  equal(resolve({ DISCORD_TRANSPORT: "http" }), "http");
+  equal(resolve({}, true), "http");
 });
 
 Deno.test("Gateway commands post initial replies and modals to Discord's callback endpoint", async () => {

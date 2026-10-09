@@ -1,18 +1,14 @@
 import postgres from "postgres";
 import { createBot } from "./bot.ts";
 import { syncSolutions } from "./solutions.ts";
-import { connectGateway } from "./gateway.ts";
+import type { connectGateway } from "./gateway.ts";
+import { transportFor } from "./runtime.ts";
 
 const env = (key: string) => Deno.env.get(key)?.trim() || undefined;
 const publicKey = env("DISCORD_PUBLIC_KEY");
 const token = env("DISCORD_TOKEN");
 const databaseUrl = env("DATABASE_URL");
-const transport = Deno.args.includes("--http")
-  ? "http"
-  : env("DISCORD_TRANSPORT") ?? "gateway";
-if (transport !== "gateway" && transport !== "http") {
-  throw new Error("DISCORD_TRANSPORT must be gateway or http");
-}
+const transport = transportFor(env, Deno.args.includes("--http"));
 if (!token || !databaseUrl) {
   throw new Error("Set DISCORD_TOKEN and DATABASE_URL");
 }
@@ -106,16 +102,19 @@ async function shutdown() {
   await server.shutdown();
   await sql.end({ timeout: 2 });
 }
-for (const signal of ["SIGINT", "SIGTERM"] as const) {
-  Deno.addSignalListener(signal, () => {
-    void shutdown().finally(() => Deno.exit());
-  });
+if (!env("DENO_DEPLOYMENT_ID") && env("DENO_DEPLOY") !== "true") {
+  for (const signal of ["SIGINT", "SIGTERM"] as const) {
+    Deno.addSignalListener(signal, () => {
+      void shutdown().finally(() => Deno.exit());
+    });
+  }
 }
 
 try {
   await bot.initialize();
   await syncSolutions(sql, env("TICKET_SOLUTIONS_DIR") ?? "it-tickets");
   if (transport === "gateway") {
+    const { connectGateway } = await import("./gateway.ts");
     gateway = await connectGateway(token, bot.handleGatewayInteraction);
   }
   void Promise.allSettled([

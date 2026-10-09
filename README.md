@@ -79,7 +79,7 @@ through its environment settings.
 | ------------------------ | ----------------------------------------------------------------------- |
 | `DISCORD_PUBLIC_KEY`     | Discord verification key, 64 hex characters; required for HTTP mode     |
 | `DISCORD_TOKEN`          | Discord bot token                                                       |
-| `DISCORD_TRANSPORT`      | `gateway` (default) for local/server bots; `http` for Deno Deploy       |
+| `DISCORD_TRANSPORT`      | Optional override: local defaults to `gateway`, Deno Deploy to `http`   |
 | `DISCORD_APPLICATION_ID` | Optional application ID; otherwise resolved through Discord             |
 | `DISCORD_IT_USER`        | Optional initial on-call staff member and empty-roster fallback         |
 | `DATABASE_URL`           | Neon pooled PostgreSQL URL, including `sslmode=require`                 |
@@ -108,10 +108,20 @@ enabled.
 
 ## Deno Deploy and Discord setup
 
-Configure the Deno Deploy application with entrypoint `src/main.ts`,
-`DISCORD_TRANSPORT=http`, and this repository as its source. Configure
-credentials for the intended production and preview contexts. Keep preview
-databases separate when trying changes.
+Configure the Deno Deploy application with entrypoint `src/main.ts` and this
+repository as its source. HTTP mode is selected automatically from Deno Deploy's
+predefined environment variables. Set `DISCORD_TRANSPORT=http` for an explicit
+override. Configure credentials in both Production and Development; preview
+warm-up uses Development and cannot start without its own Discord token, public
+key, and database URL. Preview databases can be separate when trying changes.
+
+GitHub pushes redeploy automatically when this repository's `main` branch is
+connected and the app is enabled. The ignored local `.env` is not sent to
+GitHub. In Settings, import the environment file using **Add from .env file**,
+assign the variables to the intended contexts, and save. The local `.env.deploy`
+file, when present, contains the same working credentials with HTTP mode
+selected. Mark database URLs, bot/API tokens, client secrets, and refresh tokens
+as secrets.
 
 Set these Discord developer portal URLs using the HTTPS domain from Deno Deploy:
 
