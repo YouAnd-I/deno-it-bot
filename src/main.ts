@@ -47,6 +47,19 @@ const bot = createBot({
   },
 }, sql);
 
+if (transport === "http") {
+  try {
+    await bot.initialize();
+  } catch (error) {
+    console.error(
+      "[startup]",
+      error instanceof Error ? error.message : "unknown error",
+    );
+    await sql.end({ timeout: 2 });
+    Deno.exit(1);
+  }
+}
+
 let gateway: Awaited<ReturnType<typeof connectGateway>> | undefined;
 const server = Deno.serve(
   { port: Number(env("PORT") ?? "8000") },

@@ -111,9 +111,10 @@ enabled.
 Configure the Deno Deploy application with entrypoint `src/main.ts` and this
 repository as its source. HTTP mode is selected automatically from Deno Deploy's
 predefined environment variables. Set `DISCORD_TRANSPORT=http` for an explicit
-override. Configure credentials in both Production and Development; preview
-warm-up uses Development and cannot start without its own Discord token, public
-key, and database URL. Preview databases can be separate when trying changes.
+override. Configure credentials in both Production and Preview (called
+Development in some organizations); preview warm-up uses that context and cannot
+start without its own Discord token, public key, and database URL. Preview
+databases can be separate when trying changes.
 
 GitHub pushes redeploy automatically when this repository's `main` branch is
 connected and the app is enabled. The ignored local `.env` is not sent to
@@ -142,10 +143,11 @@ version is saved in Neon to avoid registering them on every replica or cold
 start. `deno task register` forces registration without starting the HTTP
 server.
 
-Discord validates the endpoint with a signed PING. PING and the policy pages
-work while the database is initializing. Requests with invalid or old signatures
-get 401. Configuring an HTTP interactions endpoint routes commands to this
-application; the gateway-based C# bot will not receive those interactions.
+HTTP startup initializes the database before listening, so Deno Deploy's warm-up
+does not route ticket submissions to an instance that is still starting. Discord
+validates the endpoint with a signed PING. Requests with invalid or old
+signatures get 401. Configuring an HTTP interactions endpoint routes commands to
+this application; the gateway-based C# bot will not receive those interactions.
 
 ## Deferred work and scheduled sync
 

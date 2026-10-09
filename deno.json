@@ -15,5 +15,9 @@
     "register": "deno run --allow-env --allow-net --env-file=.env src/register.ts",
     "migrate": "deno run --allow-env --allow-net --allow-read=src --env-file=.env src/migrate.ts",
     "google-auth": "deno run --allow-env --allow-net --env-file=.env src/google_auth.ts"
+  },
+  "deploy": {
+    "org": "ia",
+    "app": "deno-it-bot"
   }
 }
