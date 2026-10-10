@@ -47,19 +47,6 @@ const bot = createBot({
   },
 }, sql);
 
-if (transport === "http") {
-  try {
-    await bot.initialize();
-  } catch (error) {
-    console.error(
-      "[startup]",
-      error instanceof Error ? error.message : "unknown error",
-    );
-    await sql.end({ timeout: 2 });
-    Deno.exit(1);
-  }
-}
-
 let gateway: Awaited<ReturnType<typeof connectGateway>> | undefined;
 const server = Deno.serve(
   { port: Number(env("PORT") ?? "8000") },
@@ -68,26 +55,22 @@ const server = Deno.serve(
     if (
       request.method === "GET" && new URL(request.url).pathname === "/ready"
     ) {
-      const database = (await response.json()).ready;
+      const health = await response.json();
       const connected = transport === "http" || gateway?.ready === true;
       return Response.json({
-        ready: database && connected,
-        database,
+        ...health,
+        ready: health.ready && connected,
+        database: health.ready,
         transport,
         connected,
       }, {
-        status: database && connected ? 200 : 503,
+        status: health.ready && connected ? 200 : 503,
       });
     }
     return response;
   },
 );
 console.log(`[discord] transport: ${transport}`);
-if (transport === "http") {
-  console.log(
-    "[discord] Set the Interactions Endpoint URL to this server's public HTTPS /interactions URL",
-  );
-}
 const run = async (
   name: string,
   action: () => Promise<unknown>,
@@ -123,23 +106,40 @@ if (!env("DENO_DEPLOYMENT_ID") && env("DENO_DEPLOY") !== "true") {
   }
 }
 
-try {
+const prepare = async () => {
   await bot.initialize();
   await syncSolutions(sql, env("TICKET_SOLUTIONS_DIR") ?? "it-tickets");
-  if (transport === "gateway") {
-    const { connectGateway } = await import("./gateway.ts");
-    gateway = await connectGateway(token, bot.handleGatewayInteraction);
-  }
+};
+const maintain = () =>
   void Promise.allSettled([
     run("jobs", bot.processPending),
     run("commands", bot.registerCommands),
     run("sheets", bot.syncSheets),
   ]);
-} catch (error) {
-  console.error(
-    "[startup]",
-    error instanceof Error ? error.message : "unknown error",
-  );
-  await shutdown();
-  Deno.exit(1);
+if (transport === "http") {
+  void run("discord", async () => {
+    const endpoint = await bot.interactionsEndpoint();
+    if (endpoint) {
+      console.log(`[discord] Discord sends interactions to ${endpoint}`);
+    } else {
+      console.warn(
+        "[discord] The Developer Portal's Interactions Endpoint URL is empty, so Discord delivers commands over the Gateway and this HTTP server never receives them. Set it to this deployment's https://<domain>/interactions URL.",
+      );
+    }
+  });
+  void run("startup", prepare).then(maintain);
+} else {
+  try {
+    await prepare();
+    const { connectGateway } = await import("./gateway.ts");
+    gateway = await connectGateway(token, bot.handleGatewayInteraction);
+    maintain();
+  } catch (error) {
+    console.error(
+      "[startup]",
+      error instanceof Error ? error.message : "unknown error",
+    );
+    await shutdown();
+    Deno.exit(1);
+  }
 }

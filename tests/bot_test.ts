@@ -300,7 +300,11 @@ Deno.test("Discord edits the deferred original and uploads webhook files without
 
 Deno.test("health and policy pages are available while the database initializes", async () => {
   const { sql } = fakeDatabase();
-  const bot = createBot({ publicKey, token: "test" }, sql);
+  const bot = createBot(
+    { publicKey, token: "test" },
+    sql,
+    () => Promise.resolve(json({ id: "999", interactions_endpoint_url: null })),
+  );
   equal((await bot.fetch(new Request("http://localhost/ready"))).status, 503);
   for (const path of ["/", "/terms", "/privacy"]) {
     equal(
@@ -309,4 +313,248 @@ Deno.test("health and policy pages are available while the database initializes"
     );
   }
   equal((await bot.fetch(new Request("http://localhost/unknown"))).status, 404);
+});
+
+Deno.test("PING and utility commands answer while the database is still starting", async () => {
+  let open!: () => void;
+  const gate = new Promise<void>((resolve) => open = resolve);
+  const { sql } = fakeDatabase(async () => {
+    await gate;
+    return [];
+  });
+  const bot = createBot(
+    { publicKey, token: "test", registerCommands: false },
+    sql,
+  );
+  const ping = await bot.fetch(await signedRequest({ type: 1 }));
+  deepStrictEqual(await ping.json(), { type: 1 });
+  const response = await bot.fetch(
+    await signedRequest(interaction({ name: "ping" })),
+  );
+  equal((await response.json()).data.content, "Pong You!!");
+  open();
+  await delay();
+});
+
+Deno.test("ticket submission waits for the job save within the acknowledgement budget", async () => {
+  let open!: () => void;
+  const gate = new Promise<void>((resolve) => open = resolve);
+  const { sql, queries } = fakeDatabase(async () => {
+    await gate;
+    return [];
+  });
+  const bot = createBot(
+    { publicKey, token: "test", registerCommands: false },
+    sql,
+  );
+  const pending = bot.fetch(
+    await signedRequest(interaction({
+      name: "it",
+      options: [{ name: "title", value: "Printer" }],
+    })),
+  );
+  await delay();
+  ok(!queries.some((query) => query.text.includes("insert into ticket_job")));
+  open();
+  const response = await pending;
+  deepStrictEqual(await response.json(), { type: 5, data: { flags: 64 } });
+  ok(queries.some((query) => query.text.includes("insert into ticket_job")));
+  await delay();
+});
+
+Deno.test("a slow database still gets an acknowledgement and saves right after", async () => {
+  let open!: () => void;
+  const gate = new Promise<void>((resolve) => open = resolve);
+  const { sql, queries } = fakeDatabase(async () => {
+    await gate;
+    return [];
+  });
+  const bot = createBot(
+    {
+      publicKey,
+      token: "test",
+      registerCommands: false,
+      acknowledgeWithinMs: 20,
+    },
+    sql,
+  );
+  const response = await bot.fetch(
+    await signedRequest(interaction({
+      name: "it",
+      options: [{ name: "title", value: "Printer" }],
+    })),
+  );
+  deepStrictEqual(await response.json(), { type: 5, data: { flags: 64 } });
+  ok(!queries.some((query) => query.text.includes("insert into ticket_job")));
+  open();
+  await delay();
+  const insert = queries.findIndex((query) =>
+    query.text.includes("insert into ticket_job")
+  );
+  ok(insert > 0);
+  const claim = queries.findIndex((query) =>
+    query.text.toLowerCase().includes("skip locked")
+  );
+  ok(claim > insert);
+});
+
+Deno.test("a database that cannot save notifies through the deferred reply webhook", async () => {
+  const { sql } = fakeDatabase(() => {
+    throw Object.assign(new Error("connection failure"), { code: "08006" });
+  });
+  const calls: {
+    url: string;
+    method?: string;
+    body: Record<string, unknown>;
+  }[] = [];
+  const bot = createBot(
+    {
+      publicKey,
+      token: "test",
+      registerCommands: false,
+      acknowledgeWithinMs: 20,
+    },
+    sql,
+    (url, init) => {
+      calls.push({
+        url: String(url),
+        method: init?.method,
+        body: JSON.parse(String(init?.body ?? "{}")),
+      });
+      return Promise.resolve(json({ id: "m1" }));
+    },
+  );
+  const response = await bot.fetch(
+    await signedRequest(interaction({
+      name: "it",
+      options: [{ name: "title", value: "Printer" }],
+    })),
+  );
+  deepStrictEqual(await response.json(), { type: 5, data: { flags: 64 } });
+  await delay();
+  await delay();
+  const patch = calls.find((call) => call.method === "PATCH")!;
+  equal(
+    patch.url,
+    "https://discord.com/api/v10/webhooks/999/test-token/messages/@original",
+  );
+  match(String(patch.body.content), /couldn't save this right now/);
+
+  calls.length = 0;
+  const update = await bot.fetch(
+    await signedRequest(interaction({ custom_id: "itstatus:complete:t1" }, 3)),
+  );
+  deepStrictEqual(await update.json(), { type: 6 });
+  await delay();
+  await delay();
+  const followup = calls.find((call) => call.method === "POST")!;
+  equal(
+    followup.url,
+    "https://discord.com/api/v10/webhooks/999/test-token",
+  );
+  equal(followup.body.flags, 64);
+  match(String(followup.body.content), /couldn't save this right now/);
+  ok(!calls.some((call) => call.method === "PATCH"));
+});
+
+Deno.test("a wake-up during a job pass triggers another claim pass", async () => {
+  const { sql, queries } = fakeDatabase(async (query) => {
+    if (query.text.toLowerCase().includes("skip locked")) {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    return [];
+  });
+  const bot = createBot(
+    { publicKey, token: "test", registerCommands: false },
+    sql,
+  );
+  await bot.initialize();
+  queries.length = 0;
+  await Promise.all([bot.processPending(), bot.processPending()]);
+  equal(
+    queries.filter((query) => query.text.toLowerCase().includes("skip locked"))
+      .length,
+    2,
+  );
+  queries.length = 0;
+  await bot.processPending();
+  equal(
+    queries.filter((query) => query.text.toLowerCase().includes("skip locked"))
+      .length,
+    1,
+  );
+});
+
+Deno.test("/ready reports where Discord routes interactions", async () => {
+  for (
+    const [endpoint, expected] of [
+      ["https://bot.example/interactions", "this-server"],
+      ["https://bot.example/interactions/", "this-server"],
+      [null, "gateway"],
+      ["", "gateway"],
+      ["https://elsewhere.example/interactions", "elsewhere"],
+    ] as const
+  ) {
+    const { sql } = fakeDatabase();
+    const bot = createBot(
+      { publicKey, token: "test", registerCommands: false },
+      sql,
+      () =>
+        Promise.resolve(
+          json({ id: "999", interactions_endpoint_url: endpoint }),
+        ),
+    );
+    const response = await bot.fetch(new Request("https://bot.example/ready"));
+    equal(response.status, 503);
+    const body = await response.json();
+    equal(body.ready, false);
+    equal(body.interactions, expected);
+  }
+
+  const { sql } = fakeDatabase();
+  let calls = 0;
+  const cached = createBot(
+    { publicKey, token: "test", registerCommands: false },
+    sql,
+    () => {
+      calls++;
+      return Promise.resolve(
+        json({ id: "999", interactions_endpoint_url: null }),
+      );
+    },
+  );
+  await cached.fetch(new Request("https://bot.example/ready"));
+  await cached.fetch(new Request("https://bot.example/ready"));
+  equal(calls, 1);
+
+  const unreachable = createBot(
+    { publicKey, token: "test", registerCommands: false },
+    fakeDatabase().sql,
+    () => Promise.resolve(json({ message: "401: Unauthorized" }, 401)),
+  );
+  const unknown = await (await unreachable.fetch(
+    new Request("https://bot.example/ready"),
+  )).json();
+  equal(unknown.interactions, "unknown");
+
+  const initialized = createBot(
+    { publicKey, token: "test", registerCommands: false },
+    fakeDatabase().sql,
+    () =>
+      Promise.resolve(
+        json({
+          id: "999",
+          interactions_endpoint_url: "https://bot.example/interactions",
+        }),
+      ),
+  );
+  await initialized.initialize();
+  const health = await initialized.fetch(
+    new Request("https://bot.example/ready"),
+  );
+  equal(health.status, 200);
+  const state = await health.json();
+  equal(state.schema, "migrated");
+  equal(typeof state.initMs, "number");
+  equal(state.interactions, "this-server");
 });

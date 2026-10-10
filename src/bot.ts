@@ -31,6 +31,7 @@ import {
   markDelivery,
   recordInteraction,
   retryJob,
+  sha256,
 } from "./storage.ts";
 import {
   classify,
@@ -51,6 +52,7 @@ export type BotConfig = {
   cloudflareToken?: string;
   google?: SheetsOptions;
   registerCommands?: boolean;
+  acknowledgeWithinMs?: number;
 };
 
 const json = (body: unknown, status = 200) =>
@@ -71,15 +73,25 @@ export function createBot(
 ) {
   const discord = new DiscordClient(config.token, http, config.applicationId);
   const sheets = new SheetsSync(sql, config.google ?? {}, http);
+  const acknowledgeWithin = config.acknowledgeWithinMs ?? 2000;
   let ready = false;
+  let schema: "current" | "migrated" | null = null;
+  let initMs: number | null = null;
   let initializing: Promise<void> | null = null;
   let working = false;
+  let rerun = false;
+  let endpointLookup: Promise<string | null> | null = null;
+  let endpointAt = 0;
 
   function initialize(): Promise<void> {
     if (ready) return Promise.resolve();
     if (!initializing) {
-      initializing = initializeDatabase(sql, config.itUser).then(() => {
+      const started = performance.now();
+      initializing = initializeDatabase(sql, config.itUser).then((state) => {
         ready = true;
+        schema = state;
+        initMs = Math.round(performance.now() - started);
+        console.log(`[database] ready in ${initMs}ms (schema ${state})`);
       }).finally(() => {
         initializing = null;
       });
@@ -98,21 +110,63 @@ export function createBot(
     ticketId: string,
     responseType: number,
   ) {
-    if (!ready) {
-      return json(
-        message(
-          "The ticket service is starting. Please try again in a few seconds.",
-        ),
-      );
-    }
     if (!user(payload.interaction).id) {
       return json(message("This interaction has no Discord user."));
     }
-    await enqueueJob(sql, payload, ticketId);
+    const saved = initialize().then(() => enqueueJob(sql, payload, ticketId));
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const outcome = await Promise.race([
+      saved.then(() => "saved" as const, () => "failed" as const),
+      new Promise<"late">((resolve) => {
+        timer = setTimeout(() => resolve("late"), acknowledgeWithin);
+      }),
+    ]);
+    clearTimeout(timer);
+    if (outcome !== "saved") {
+      background(
+        () => finishLate(saved, payload, ticketId, responseType),
+        "queue",
+      );
+    }
     return json({
       type: responseType,
       ...(responseType === 5 ? { data: { flags: 64 } } : {}),
     });
+  }
+
+  async function finishLate(
+    saved: Promise<void>,
+    payload: JobPayload,
+    ticketId: string,
+    responseType: number,
+  ) {
+    try {
+      await saved;
+    } catch (error) {
+      logError("queue", error);
+      await new Promise((resolve) =>
+        setTimeout(resolve, Math.min(1000, acknowledgeWithin))
+      );
+      try {
+        await initialize();
+        await enqueueJob(sql, payload, ticketId);
+      } catch (retryError) {
+        logError("queue", retryError);
+        const notice = messagePayload(
+          "The ticket service couldn't save this right now. Please try again in a minute.",
+        );
+        if (responseType === 6) {
+          await discord.followup(payload.interaction, {
+            ...notice,
+            flags: 64,
+          });
+        } else {
+          await discord.editOriginal(payload.interaction, notice);
+        }
+        return;
+      }
+    }
+    await processPending();
   }
 
   function dispatch(interaction: Interaction): Response | Promise<Response> {
@@ -296,7 +350,14 @@ export function createBot(
       if (url.pathname === "/") {
         return new Response("YouAnd-I IT ticket bot (HTTP) is running");
       }
-      if (url.pathname === "/ready") return json({ ready }, ready ? 200 : 503);
+      if (url.pathname === "/ready") {
+        return json({
+          ready,
+          schema,
+          initMs,
+          interactions: await interactionsRoute(url),
+        }, ready ? 200 : 503);
+      }
     }
     if (request.method !== "POST" || url.pathname !== "/interactions") {
       return new Response("Not Found", { status: 404 });
@@ -488,49 +549,60 @@ export function createBot(
 
   async function processPending() {
     await initialize();
-    if (working) return;
+    if (working) {
+      rerun = true;
+      return;
+    }
     working = true;
     try {
+      rerun = false;
       await cleanJobs(sql);
-      for (let i = 0; i < 20; i++) {
-        const job = await claimJob(sql);
-        if (!job) break;
-        try {
+      let again = true;
+      while (again) {
+        for (let i = 0; i < 20; i++) {
+          const job = await claimJob(sql);
+          if (!job) break;
           try {
-            await recordInteraction(sql, job.payload.interaction);
-          } catch (error) {
-            logError("audit", error);
-          }
-          const classification =
-            job.payload.operation === "create" && !job.applied_at_utc
-              ? await createClassification(job)
-              : undefined;
-          await applyJob(sql, job, classification);
-          await deliver(job);
-          await finishJob(sql, job);
-        } catch (error) {
-          logError("ticket job", error);
-          if (error instanceof Error && error.message === "Ticket not found") {
-            await discord.followup(job.payload.interaction, {
-              content: "This ticket no longer exists.",
-              flags: 64,
-            });
-            await finishJob(sql, job);
-            continue;
-          }
-          await retryJob(sql, job);
-          if (!job.applied_at_utc && job.attempts === 1) {
             try {
+              await recordInteraction(sql, job.payload.interaction);
+            } catch (error) {
+              logError("audit", error);
+            }
+            const classification =
+              job.payload.operation === "create" && !job.applied_at_utc
+                ? await createClassification(job)
+                : undefined;
+            await applyJob(sql, job, classification);
+            await deliver(job);
+            await finishJob(sql, job);
+          } catch (error) {
+            logError("ticket job", error);
+            if (
+              error instanceof Error && error.message === "Ticket not found"
+            ) {
               await discord.followup(job.payload.interaction, {
-                content:
-                  "Ticket processing was interrupted. I'll retry shortly.",
+                content: "This ticket no longer exists.",
                 flags: 64,
               });
-            } catch (error) {
-              logError("job receipt", error);
+              await finishJob(sql, job);
+              continue;
+            }
+            await retryJob(sql, job);
+            if (!job.applied_at_utc && job.attempts === 1) {
+              try {
+                await discord.followup(job.payload.interaction, {
+                  content:
+                    "Ticket processing was interrupted. I'll retry shortly.",
+                  flags: 64,
+                });
+              } catch (error) {
+                logError("job receipt", error);
+              }
             }
           }
         }
+        again = rerun;
+        rerun = false;
       }
     } finally {
       working = false;
@@ -546,14 +618,7 @@ export function createBot(
     if (config.registerCommands === false) return;
     await initialize();
     const { COMMANDS } = await import("./protocol.ts");
-    const digest = await crypto.subtle.digest(
-      "SHA-256",
-      new TextEncoder().encode(JSON.stringify(COMMANDS)),
-    );
-    const version = Array.from(
-      new Uint8Array(digest),
-      (value) => value.toString(16).padStart(2, "0"),
-    ).join("");
+    const version = await sha256(JSON.stringify(COMMANDS));
     const key = `commands:${config.applicationId ?? config.publicKey}`;
     await sql`insert into ticket_sync_state(sync_key) values (${key}) on conflict do nothing`;
     const [lease] =
@@ -569,10 +634,43 @@ export function createBot(
     }
   }
 
+  function interactionsEndpoint(): Promise<string | null> {
+    const now = Date.now();
+    if (!endpointLookup || now - endpointAt > 60000) {
+      endpointAt = now;
+      const lookup = discord.request("/oauth2/applications/@me").then(
+        (application) => {
+          const endpoint = application.interactions_endpoint_url;
+          return typeof endpoint === "string" && endpoint ? endpoint : null;
+        },
+      );
+      endpointLookup = lookup;
+      lookup.catch(() => {
+        if (endpointLookup === lookup) endpointLookup = null;
+      });
+    }
+    return endpointLookup;
+  }
+
+  async function interactionsRoute(url: URL) {
+    try {
+      const endpoint = await interactionsEndpoint();
+      if (!endpoint) return "gateway";
+      const target = new URL(endpoint);
+      return target.host === url.host &&
+          target.pathname.replace(/\/+$/, "") === "/interactions"
+        ? "this-server"
+        : "elsewhere";
+    } catch {
+      return "unknown";
+    }
+  }
+
   return {
     fetch: fetchRequest,
     handleGatewayInteraction,
     initialize,
+    interactionsEndpoint,
     processPending,
     syncSheets,
     registerCommands,

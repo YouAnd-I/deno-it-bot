@@ -60,8 +60,12 @@ with a clear error if that field would route commands somewhere else.
 
 The HTTP server defaults to `http://localhost:8000`. `/ready` returns 200 only
 after the database initializes and the Gateway connects, and 503 during startup
-or a disconnect. `PORT` changes the listener port. The HTTP server also serves
-the policy pages and the signed interaction endpoint.
+or a disconnect. Its body reports `schema` (`current` when the stored
+fingerprint matched so setup was skipped, `migrated` when `schema.sql` was
+applied), `initMs`, and `interactions`, which shows where the Interactions
+Endpoint URL routes commands: `this-server`, `gateway`, `elsewhere`, or
+`unknown`. `PORT` changes the listener port. The HTTP server also serves the
+policy pages and the signed interaction endpoint.
 
 `deno task start:http` explicitly uses HTTP interactions instead. Discord must
 be configured to reach that server through a public HTTPS endpoint; localhost
@@ -97,9 +101,11 @@ through its environment settings.
 The existing Neon tickets, users, notes, reports, staff, and solutions are
 reused. `src/schema.sql` initializes an empty database and adds the internal job
 and sync tables to an existing one. Initialization is serialized with a
-transaction lock. It does not overwrite edited priority guidance or remove
-existing tables. `deno task migrate` runs this schema setup separately; use a
-development Neon branch when validating schema changes before production.
+transaction lock and runs only when the stored schema fingerprint changes or the
+on-call fallback must seed an empty roster. It does not overwrite edited
+priority guidance or remove existing tables. `deno task migrate` always applies
+the full schema; use a development Neon branch when validating schema changes
+before production.
 
 `deno task google-auth` opens a local OAuth callback listener and prints a
 browser consent URL. After approval it prints the refresh token for the
@@ -143,23 +149,29 @@ version is saved in Neon to avoid registering them on every replica or cold
 start. `deno task register` forces registration without starting the HTTP
 server.
 
-HTTP startup initializes the database before listening, so Deno Deploy's warm-up
-does not route ticket submissions to an instance that is still starting. Discord
-validates the endpoint with a signed PING. Requests with invalid or old
+HTTP startup listens immediately and connects to the database in the background:
+Discord allows three seconds for the first reply, and Deno Deploy starts
+instances on demand and waits only for the listener. A cold start costs one
+query when the schema fingerprint stored in `ticket_sync_state` matches. Startup
+logs a warning when the Developer Portal's Interactions Endpoint URL is empty.
+Discord validates the endpoint with a signed PING. Requests with invalid or old
 signatures get 401. Configuring an HTTP interactions endpoint routes commands to
 this application; the gateway-based C# bot will not receive those interactions.
 
 ## Deferred work and scheduled sync
 
 Ticket operations are saved in `ticket_job` before returning Discord's deferred
-acknowledgement. A worker starts immediately, and `ticket-job-retry` runs every
-minute to resume interrupted jobs. The ticket mutation and its applied marker
-commit in one transaction, so recovery does not create another ticket, note,
-report, or status event. Workers claim jobs with a lease and `SKIP LOCKED`.
-Discord DM deliveries use a nonce derived from the interaction and destination
-channel, so requester and IT notifications remain distinct while retries
-deduplicate each delivery. Original interaction replies are edited through
-Discord's webhook endpoint.
+acknowledgement. If the database cannot save within two seconds the
+acknowledgement is sent anyway, the job is saved right after with one retry, and
+the requester gets an error message if that fails. A worker starts immediately,
+wake-ups requested mid-run trigger another pass, and `ticket-job-retry` runs
+every minute to resume interrupted jobs. The ticket mutation and its applied
+marker commit in one transaction, so recovery does not create another ticket,
+note, report, or status event. Workers claim jobs with a lease and
+`SKIP LOCKED`. Discord DM deliveries use a nonce derived from the interaction
+and destination channel, so requester and IT notifications remain distinct while
+retries deduplicate each delivery. Original interaction replies are edited
+through Discord's webhook endpoint.
 
 Completed jobs clear their payload and tokens immediately. Expired jobs are
 removed on maintenance. Jobs expire before Discord's 15-minute interaction token

@@ -38,23 +38,59 @@ export type Job = {
   attempts: number;
 };
 
-export async function initializeDatabase(sql: Database, fallbackUser?: string) {
+export async function sha256(text: string): Promise<string> {
+  const digest = await crypto.subtle.digest(
+    "SHA-256",
+    new TextEncoder().encode(text),
+  );
+  return Array.from(
+    new Uint8Array(digest),
+    (value) => value.toString(16).padStart(2, "0"),
+  ).join("");
+}
+
+export async function initializeDatabase(
+  sql: Database,
+  fallbackUser?: string,
+  force = false,
+): Promise<"current" | "migrated"> {
   const schema = await Deno.readTextFile(
     new URL("./schema.sql", import.meta.url),
   );
+  const version = await sha256(schema);
+  const seed = fallbackUser && /^\d+$/.test(fallbackUser)
+    ? fallbackUser
+    : undefined;
+  if (!force) {
+    try {
+      const [state] = await sql<
+        { version: string | null; staffed: boolean }[]
+      >`select (select value from ticket_sync_state where sync_key = 'schema') as version,
+        exists(select 1 from it_staff) as staffed`;
+      if (state?.version === version && (state.staffed || !seed)) {
+        return "current";
+      }
+    } catch (error) {
+      if ((error as { code?: string }).code !== "42P01") throw error;
+    }
+  }
   await sql.begin(async (tx) => {
     await tx`select pg_advisory_xact_lock(92610741)`;
     await tx.unsafe(schema);
-    if (fallbackUser && /^\d+$/.test(fallbackUser)) {
+    if (seed) {
       const [existing] = await tx`select user_id from it_staff limit 1`;
       if (!existing) {
-        await ensureUser(tx, { id: fallbackUser, username: "on-call" });
+        await ensureUser(tx, { id: seed, username: "on-call" });
         await tx`insert into it_staff(user_id, display_name, handles, active)
-          values (${fallbackUser}::bigint, 'on-call', 'everything IT — first responder', true)
+          values (${seed}::bigint, 'on-call', 'everything IT — first responder', true)
           on conflict do nothing`;
       }
     }
+    await tx`insert into ticket_sync_state(sync_key, value, synced_at_utc)
+      values ('schema', ${version}, now())
+      on conflict(sync_key) do update set value = excluded.value, synced_at_utc = now()`;
   });
+  return "migrated";
 }
 
 export async function ensureUser(sql: Executor, actor: User) {
